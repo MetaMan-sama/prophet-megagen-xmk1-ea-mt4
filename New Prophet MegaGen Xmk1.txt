@@ -1,0 +1,818 @@
+#property strict
+#property copyright "Pattern Recognition EA"
+#property version   "1.00"
+#property description "Expert Advisor based on candlestick and chart patterns"
+
+//--- Input Parameters
+input double LotSize = 0.1;          // Trade lot size
+input int    MagicNumber = 12345;    // EA Magic Number
+input int    Slippage = 3;           // Allowed slippage in points
+input bool   UseTrailingStop = true; // Enable trailing stop
+input bool   UseTrendFilter = true;  // Enable trend filtering with EMA
+input int    EMAPeriod = 50;         // EMA period for trend filtering
+input bool   UseVolumeFilter = true; // Filter patterns by volume
+input int    ATRPeriod = 14;         // ATR period for stop loss
+input double RiskRewardRatio = 2.0;  // Risk:Reward ratio for TP
+input int    MaxBarsForPattern = 50; // Maximum bars to scan for patterns
+
+//--- Global Variables
+double point;                        // Point value
+int    emaHandle;                    // EMA indicator handle
+int    atrHandle;                    // ATR indicator handle
+
+//--- Pattern Types Enumeration
+enum PATTERN_TYPE {
+    PATTERN_NONE,
+    // Bullish reversal patterns
+    PATTERN_HAMMER, PATTERN_INVERTED_HAMMER, PATTERN_DRAGONFLY_DOJI, 
+    PATTERN_BULLISH_SPINNING_TOP, PATTERN_BULLISH_KICKER, PATTERN_BULLISH_ENGULFING,
+    PATTERN_BULLISH_HARAMI, PATTERN_PIERCING_LINE, PATTERN_TWEEZER_BOTTOM,
+    PATTERN_MORNING_STAR, PATTERN_BULLISH_ABANDONED_BABY, PATTERN_THREE_WHITE_SOLDIERS,
+    PATTERN_BULLISH_THREE_LINE_STRIKE, PATTERN_MORNING_DOJI_STAR, PATTERN_THREE_INSIDE_UP,
+    PATTERN_THREE_OUTSIDE_UP, PATTERN_BULLISH_CROSS, PATTERN_BULLISH_MEETING_LINE,
+    // Add all other bullish patterns from the list...
+    
+    // Bearish reversal patterns
+    PATTERN_HANGING_MAN, PATTERN_SHOOTING_STAR, PATTERN_BEARISH_SPINNING_TOP,
+    PATTERN_GRAVESTONE_DOJI, PATTERN_BEARISH_KICKER, PATTERN_BEARISH_ENGULFING,
+    PATTERN_BEARISH_HARAMI, PATTERN_DARK_CLOUD_COVER, PATTERN_TWEEZER_TOP,
+    PATTERN_EVENING_STAR, PATTERN_BEARISH_ABANDONED_BABY, PATTERN_THREE_BLACK_CROWS,
+    PATTERN_BEARISH_THREE_LINE_STRIKE, PATTERN_EVENING_DOJI_STAR, PATTERN_THREE_INSIDE_DOWN,
+    PATTERN_THREE_OUTSIDE_DOWN, PATTERN_BEARISH_HARAMI_CROSS,
+    // Add all other bearish patterns from the list...
+    
+    // Chart patterns
+    PATTERN_DOUBLE_BOTTOM, PATTERN_DOUBLE_TOP, PATTERN_HEAD_SHOULDERS,
+    PATTERN_INVERTED_HEAD_SHOULDERS, PATTERN_ASCENDING_TRIANGLE, PATTERN_DESCENDING_TRIANGLE,
+    PATTERN_SYMMETRICAL_TRIANGLE, PATTERN_BULL_FLAG, PATTERN_BEAR_FLAG,
+    PATTERN_BULLISH_PENNANT, PATTERN_BEARISH_PENNANT, PATTERN_CUP_WITH_HANDLE,
+    PATTERN_INVERTED_CUP, PATTERN_BULLISH_RECTANGLE, PATTERN_BEARISH_RECTANGLE,
+    PATTERN_BULLISH_WEDGE, PATTERN_BEARISH_WEDGE,
+    // Add all other chart patterns from the list...
+    
+    PATTERN_COUNT  // Total count of patterns
+};
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    point = Point;
+    if (Digits == 3 || Digits == 5) point *= 10;
+    
+    emaHandle = iMA(NULL, 0, EMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+    atrHandle = iATR(NULL, 0, ATRPeriod);
+    
+    if (emaHandle == INVALID_HANDLE || atrHandle == INVALID_HANDLE)
+    {
+        Print("Error creating indicator handles");
+        return INIT_FAILED;
+    }
+    
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    if (emaHandle != INVALID_HANDLE) IndicatorRelease(emaHandle);
+    if (atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    static datetime lastBarTime = 0;
+    datetime currentBarTime = iTime(NULL, 0, 0);
+    
+    // Check for new bar
+    if (currentBarTime == lastBarTime) return;
+    lastBarTime = currentBarTime;
+    
+    // Check for open positions
+    if (CountOrders() > 0) 
+    {
+        ManageTrades();
+        return;
+    }
+    
+    // Detect patterns
+    PATTERN_TYPE pattern = DetectPatterns();
+    
+    if (pattern != PATTERN_NONE)
+    {
+        if (IsBullishPattern(pattern) && (!UseTrendFilter || IsBullishTrend()))
+        {
+            OpenBuy();
+        }
+        else if (IsBearishPattern(pattern) && (!UseTrendFilter || IsBearishTrend()))
+        {
+            OpenSell();
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Count open orders                                                |
+//+------------------------------------------------------------------+
+int CountOrders()
+{
+    int count = 0;
+    for (int i = 0; i < OrdersTotal(); i++)
+    {
+        if (OrderSelect(i, SELECT_BY_POS, MODE_TRADES) &&
+            OrderSymbol() == Symbol() &&
+            OrderMagicNumber() == MagicNumber)
+        {
+            count++;
+        }
+    }
+    return count;
+}
+
+//+------------------------------------------------------------------+
+//| Check if pattern is bullish                                      |
+//+------------------------------------------------------------------+
+bool IsBullishPattern(PATTERN_TYPE pattern)
+{
+    switch (pattern)
+    {
+        case PATTERN_HAMMER:
+        case PATTERN_INVERTED_HAMMER:
+        case PATTERN_DRAGONFLY_DOJI:
+        case PATTERN_BULLISH_SPINNING_TOP:
+        case PATTERN_BULLISH_KICKER:
+        case PATTERN_BULLISH_ENGULFING:
+        case PATTERN_BULLISH_HARAMI:
+        case PATTERN_PIERCING_LINE:
+        case PATTERN_TWEEZER_BOTTOM:
+        case PATTERN_MORNING_STAR:
+        case PATTERN_BULLISH_ABANDONED_BABY:
+        case PATTERN_THREE_WHITE_SOLDIERS:
+        case PATTERN_BULLISH_THREE_LINE_STRIKE:
+        case PATTERN_MORNING_DOJI_STAR:
+        case PATTERN_THREE_INSIDE_UP:
+        case PATTERN_THREE_OUTSIDE_UP:
+        case PATTERN_BULLISH_CROSS:
+        case PATTERN_BULLISH_MEETING_LINE:
+        case PATTERN_DOUBLE_BOTTOM:
+        case PATTERN_INVERTED_HEAD_SHOULDERS:
+        case PATTERN_ASCENDING_TRIANGLE:
+        case PATTERN_BULL_FLAG:
+        case PATTERN_BULLISH_PENNANT:
+        case PATTERN_CUP_WITH_HANDLE:
+        case PATTERN_BULLISH_RECTANGLE:
+        case PATTERN_BULLISH_WEDGE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check if pattern is bearish                                      |
+//+------------------------------------------------------------------+
+bool IsBearishPattern(PATTERN_TYPE pattern)
+{
+    switch (pattern)
+    {
+        case PATTERN_HANGING_MAN:
+        case PATTERN_SHOOTING_STAR:
+        case PATTERN_BEARISH_SPINNING_TOP:
+        case PATTERN_GRAVESTONE_DOJI:
+        case PATTERN_BEARISH_KICKER:
+        case PATTERN_BEARISH_ENGULFING:
+        case PATTERN_BEARISH_HARAMI:
+        case PATTERN_DARK_CLOUD_COVER:
+        case PATTERN_TWEEZER_TOP:
+        case PATTERN_EVENING_STAR:
+        case PATTERN_BEARISH_ABANDONED_BABY:
+        case PATTERN_THREE_BLACK_CROWS:
+        case PATTERN_BEARISH_THREE_LINE_STRIKE:
+        case PATTERN_EVENING_DOJI_STAR:
+        case PATTERN_THREE_INSIDE_DOWN:
+        case PATTERN_THREE_OUTSIDE_DOWN:
+        case PATTERN_BEARISH_HARAMI_CROSS:
+        case PATTERN_DOUBLE_TOP:
+        case PATTERN_HEAD_SHOULDERS:
+        case PATTERN_DESCENDING_TRIANGLE:
+        case PATTERN_BEAR_FLAG:
+        case PATTERN_BEARISH_PENNANT:
+        case PATTERN_INVERTED_CUP:
+        case PATTERN_BEARISH_RECTANGLE:
+        case PATTERN_BEARISH_WEDGE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check for bullish trend using EMA                                |
+//+------------------------------------------------------------------+
+bool IsBullishTrend()
+{
+    double emaValue[];
+    if (CopyBuffer(emaHandle, 0, 0, 1, emaValue) < 1) return false;
+    
+    return Close[0] > emaValue[0];
+}
+
+//+------------------------------------------------------------------+
+//| Check for bearish trend using EMA                                |
+//+------------------------------------------------------------------+
+bool IsBearishTrend()
+{
+    double emaValue[];
+    if (CopyBuffer(emaHandle, 0, 0, 1, emaValue) < 1) return false;
+    
+    return Close[0] < emaValue[0];
+}
+
+//+------------------------------------------------------------------+
+//| Detect all patterns                                              |
+//+------------------------------------------------------------------+
+PATTERN_TYPE DetectPatterns()
+{
+    // Check single and double candle patterns first
+    PATTERN_TYPE pattern = DetectSingleCandlePatterns();
+    if (pattern != PATTERN_NONE) return pattern;
+    
+    pattern = DetectMultiCandlePatterns();
+    if (pattern != PATTERN_NONE) return pattern;
+    
+    pattern = DetectChartPatterns();
+    
+    return pattern;
+}
+
+//+------------------------------------------------------------------+
+//| Detect single candle patterns                                    |
+//+------------------------------------------------------------------+
+PATTERN_TYPE DetectSingleCandlePatterns()
+{
+    // Hammer and Hanging Man
+    if (IsHammer(0)) return PATTERN_HAMMER;
+    if (IsHangingMan(0)) return PATTERN_HANGING_MAN;
+    
+    // Inverted Hammer and Shooting Star
+    if (IsInvertedHammer(0)) return PATTERN_INVERTED_HAMMER;
+    if (IsShootingStar(0)) return PATTERN_SHOOTING_STAR;
+    
+    // Doji patterns
+    if (IsDoji(0))
+    {
+        if (IsDragonflyDoji(0)) return PATTERN_DRAGONFLY_DOJI;
+        if (IsGravestoneDoji(0)) return PATTERN_GRAVESTONE_DOJI;
+        return PATTERN_DRAGONFLY_DOJI; // Generic doji
+    }
+    
+    // Spinning tops
+    if (IsBullishSpinningTop(0)) return PATTERN_BULLISH_SPINNING_TOP;
+    if (IsBearishSpinningTop(0)) return PATTERN_BEARISH_SPINNING_TOP;
+    
+    // Marubozu
+    if (IsBullishMarubozu(0)) return PATTERN_BULLISH_KICKER; // Approximate
+    if (IsBearishMarubozu(0)) return PATTERN_BEARISH_KICKER; // Approximate
+    
+    return PATTERN_NONE;
+}
+
+//+------------------------------------------------------------------+
+//| Detect multi-candle patterns                                     |
+//+------------------------------------------------------------------+
+PATTERN_TYPE DetectMultiCandlePatterns()
+{
+    // Engulfing patterns
+    if (IsBullishEngulfing(0)) return PATTERN_BULLISH_ENGULFING;
+    if (IsBearishEngulfing(0)) return PATTERN_BEARISH_ENGULFING;
+    
+    // Harami patterns
+    if (IsBullishHarami(0)) return PATTERN_BULLISH_HARAMI;
+    if (IsBearishHarami(0)) return PATTERN_BEARISH_HARAMI;
+    
+    // Star patterns
+    if (IsMorningStar(0)) return PATTERN_MORNING_STAR;
+    if (IsEveningStar(0)) return PATTERN_EVENING_STAR;
+    
+    // Three soldiers/crows
+    if (IsThreeWhiteSoldiers(0)) return PATTERN_THREE_WHITE_SOLDIERS;
+    if (IsThreeBlackCrows(0)) return PATTERN_THREE_BLACK_CROWS;
+    
+    // Tweezer patterns
+    if (IsTweezerBottom(0)) return PATTERN_TWEEZER_BOTTOM;
+    if (IsTweezerTop(0)) return PATTERN_TWEEZER_TOP;
+    
+    return PATTERN_NONE;
+}
+
+//+------------------------------------------------------------------+
+//| Detect chart patterns                                            |
+//+------------------------------------------------------------------+
+PATTERN_TYPE DetectChartPatterns()
+{
+    // Double top/bottom
+    if (IsDoubleBottom()) return PATTERN_DOUBLE_BOTTOM;
+    if (IsDoubleTop()) return PATTERN_DOUBLE_TOP;
+    
+    // Head and shoulders
+    if (IsHeadShoulders()) return PATTERN_HEAD_SHOULDERS;
+    if (IsInvertedHeadShoulders()) return PATTERN_INVERTED_HEAD_SHOULDERS;
+    
+    // Triangles
+    if (IsAscendingTriangle()) return PATTERN_ASCENDING_TRIANGLE;
+    if (IsDescendingTriangle()) return PATTERN_DESCENDING_TRIANGLE;
+    if (IsSymmetricalTriangle()) return PATTERN_SYMMETRICAL_TRIANGLE;
+    
+    // Flags and pennants
+    if (IsBullFlag()) return PATTERN_BULL_FLAG;
+    if (IsBearFlag()) return PATTERN_BEAR_FLAG;
+    if (IsBullishPennant()) return PATTERN_BULLISH_PENNANT;
+    if (IsBearishPennant()) return PATTERN_BEARISH_PENNANT;
+    
+    // Rectangles
+    if (IsBullishRectangle()) return PATTERN_BULLISH_RECTANGLE;
+    if (IsBearishRectangle()) return PATTERN_BEARISH_RECTANGLE;
+    
+    return PATTERN_NONE;
+}
+
+//+------------------------------------------------------------------+
+//| Pattern detection helper functions                               |
+//+------------------------------------------------------------------+
+bool IsHammer(int shift)
+{
+    double body = MathAbs(Close[shift] - Open[shift]);
+    double upperShadow = High[shift] - MathMax(Close[shift], Open[shift]);
+    double lowerShadow = MathMin(Close[shift], Open[shift]) - Low[shift];
+    double range = High[shift] - Low[shift];
+    
+    // Small body, long lower shadow, little or no upper shadow
+    return (body < range * 0.3) && 
+           (lowerShadow >= body * 2) && 
+           (upperShadow <= body * 0.1) &&
+           (Close[shift] > Open[shift]); // Ideally bullish
+}
+
+bool IsHangingMan(int shift)
+{
+    double body = MathAbs(Close[shift] - Open[shift]);
+    double upperShadow = High[shift] - MathMax(Close[shift], Open[shift]);
+    double lowerShadow = MathMin(Close[shift], Open[shift]) - Low[shift];
+    double range = High[shift] - Low[shift];
+    
+    // Similar to hammer but in an uptrend
+    return (body < range * 0.3) && 
+           (lowerShadow >= body * 2) && 
+           (upperShadow <= body * 0.1) &&
+           (Close[shift] < Open[shift]); // Ideally bearish
+}
+
+bool IsInvertedHammer(int shift)
+{
+    double body = MathAbs(Close[shift] - Open[shift]);
+    double upperShadow = High[shift] - MathMax(Close[shift], Open[shift]);
+    double lowerShadow = MathMin(Close[shift], Open[shift]) - Low[shift];
+    double range = High[shift] - Low[shift];
+    
+    // Small body, long upper shadow, little or no lower shadow
+    return (body < range * 0.3) && 
+           (upperShadow >= body * 2) && 
+           (lowerShadow <= body * 0.1) &&
+           (Close[shift] > Open[shift]); // Ideally bullish
+}
+
+bool IsShootingStar(int shift)
+{
+    double body = MathAbs(Close[shift] - Open[shift]);
+    double upperShadow = High[shift] - MathMax(Close[shift], Open[shift]);
+    double lowerShadow = MathMin(Close[shift], Open[shift]) - Low[shift];
+    double range = High[shift] - Low[shift];
+    
+    // Similar to inverted hammer but in an uptrend
+    return (body < range * 0.3) && 
+           (upperShadow >= body * 2) && 
+           (lowerShadow <= body * 0.1) &&
+           (Close[shift] < Open[shift]); // Ideally bearish
+}
+
+bool IsDoji(int shift)
+{
+    double body = MathAbs(Close[shift] - Open[shift]);
+    double range = High[shift] - Low[shift];
+    
+    // Very small body relative to range
+    return body < range * 0.05;
+}
+
+bool IsDragonflyDoji(int shift)
+{
+    if (!IsDoji(shift)) return false;
+    
+    double upperShadow = High[shift] - MathMax(Close[shift], Open[shift]);
+    double lowerShadow = MathMin(Close[shift], Open[shift]) - Low[shift];
+    
+    // Little or no upper shadow, long lower shadow
+    return upperShadow < (High[shift] - Low[shift]) * 0.1 && 
+           lowerShadow > (High[shift] - Low[shift]) * 0.6;
+}
+
+bool IsGravestoneDoji(int shift)
+{
+    if (!IsDoji(shift)) return false;
+    
+    double upperShadow = High[shift] - MathMax(Close[shift], Open[shift]);
+    double lowerShadow = MathMin(Close[shift], Open[shift]) - Low[shift];
+    
+    // Little or no lower shadow, long upper shadow
+    return lowerShadow < (High[shift] - Low[shift]) * 0.1 && 
+           upperShadow > (High[shift] - Low[shift]) * 0.6;
+}
+
+bool IsBullishSpinningTop(int shift)
+{
+    double body = MathAbs(Close[shift] - Open[shift]);
+    double upperShadow = High[shift] - MathMax(Close[shift], Open[shift]);
+    double lowerShadow = MathMin(Close[shift], Open[shift]) - Low[shift];
+    double range = High[shift] - Low[shift];
+    
+    // Small body with shadows longer than body
+    return (body < range * 0.3) && 
+           (upperShadow > body) && 
+           (lowerShadow > body) &&
+           (Close[shift] > Open[shift]); // Bullish
+}
+
+bool IsBearishSpinningTop(int shift)
+{
+    double body = MathAbs(Close[shift] - Open[shift]);
+    double upperShadow = High[shift] - MathMax(Close[shift], Open[shift]);
+    double lowerShadow = MathMin(Close[shift], Open[shift]) - Low[shift];
+    double range = High[shift] - Low[shift];
+    
+    // Small body with shadows longer than body
+    return (body < range * 0.3) && 
+           (upperShadow > body) && 
+           (lowerShadow > body) &&
+           (Close[shift] < Open[shift]); // Bearish
+}
+
+bool IsBullishMarubozu(int shift)
+{
+    double body = MathAbs(Close[shift] - Open[shift]);
+    double upperShadow = High[shift] - MathMax(Close[shift], Open[shift]);
+    double lowerShadow = MathMin(Close[shift], Open[shift]) - Low[shift];
+    double range = High[shift] - Low[shift];
+    
+    // No shadows, full body
+    return (upperShadow < point * 2) && 
+           (lowerShadow < point * 2) && 
+           (body > range * 0.99) &&
+           (Close[shift] > Open[shift]); // Bullish
+}
+
+bool IsBearishMarubozu(int shift)
+{
+    double body = MathAbs(Close[shift] - Open[shift]);
+    double upperShadow = High[shift] - MathMax(Close[shift], Open[shift]);
+    double lowerShadow = MathMin(Close[shift], Open[shift]) - Low[shift];
+    double range = High[shift] - Low[shift];
+    
+    // No shadows, full body
+    return (upperShadow < point * 2) && 
+           (lowerShadow < point * 2) && 
+           (body > range * 0.99) &&
+           (Close[shift] < Open[shift]); // Bearish
+}
+
+bool IsBullishEngulfing(int shift)
+{
+    // Need at least two candles
+    if (shift + 1 >= Bars) return false;
+    
+    // First candle bearish, second candle bullish
+    if (Close[shift+1] >= Open[shift+1] || Close[shift] <= Open[shift]) return false;
+    
+    // Second candle completely engulfs first candle
+    return Open[shift] < Close[shift+1] && Close[shift] > Open[shift+1];
+}
+
+bool IsBearishEngulfing(int shift)
+{
+    // Need at least two candles
+    if (shift + 1 >= Bars) return false;
+    
+    // First candle bullish, second candle bearish
+    if (Close[shift+1] <= Open[shift+1] || Close[shift] >= Open[shift]) return false;
+    
+    // Second candle completely engulfs first candle
+    return Open[shift] > Close[shift+1] && Close[shift] < Open[shift+1];
+}
+
+bool IsBullishHarami(int shift)
+{
+    // Need at least two candles
+    if (shift + 1 >= Bars) return false;
+    
+    // First candle bearish, second candle bullish
+    if (Close[shift+1] >= Open[shift+1] || Close[shift] <= Open[shift]) return false;
+    
+    // Second candle is completely inside first candle
+    return High[shift] < High[shift+1] && 
+           Low[shift] > Low[shift+1] && 
+           Open[shift] > Close[shift+1] && 
+           Close[shift] < Open[shift+1];
+}
+
+bool IsBearishHarami(int shift)
+{
+    // Need at least two candles
+    if (shift + 1 >= Bars) return false;
+    
+    // First candle bullish, second candle bearish
+    if (Close[shift+1] <= Open[shift+1] || Close[shift] >= Open[shift]) return false;
+    
+    // Second candle is completely inside first candle
+    return High[shift] < High[shift+1] && 
+           Low[shift] > Low[shift+1] && 
+           Open[shift] < Close[shift+1] && 
+           Close[shift] > Open[shift+1];
+}
+
+bool IsMorningStar(int shift)
+{
+    // Need at least three candles
+    if (shift + 2 >= Bars) return false;
+    
+    // First candle: long bearish
+    bool firstBearish = Close[shift+2] < Open[shift+2];
+    bool firstLong = MathAbs(Close[shift+2] - Open[shift+2]) > (High[shift+2] - Low[shift+2]) * 0.6;
+    
+    // Second candle: small body (doji or spinning top)
+    double secondBody = MathAbs(Close[shift+1] - Open[shift+1]);
+    bool secondSmall = secondBody < (High[shift+1] - Low[shift+1]) * 0.3;
+    
+    // Third candle: long bullish that closes into first candle's body
+    bool thirdBullish = Close[shift] > Open[shift];
+    bool thirdLong = MathAbs(Close[shift] - Open[shift]) > (High[shift] - Low[shift]) * 0.6;
+    bool closesIntoFirst = Close[shift] > (Open[shift+2] + Close[shift+2]) / 2;
+    
+    // Gap between first and second, second and third
+    bool gapDown = Low[shift+1] < Close[shift+2];
+    bool gapUp = High[shift] > Close[shift+1];
+    
+    return firstBearish && firstLong && secondSmall && thirdBullish && thirdLong && closesIntoFirst && gapDown && gapUp;
+}
+
+bool IsEveningStar(int shift)
+{
+    // Need at least three candles
+    if (shift + 2 >= Bars) return false;
+    
+    // First candle: long bullish
+    bool firstBullish = Close[shift+2] > Open[shift+2];
+    bool firstLong = MathAbs(Close[shift+2] - Open[shift+2]) > (High[shift+2] - Low[shift+2]) * 0.6;
+    
+    // Second candle: small body (doji or spinning top)
+    double secondBody = MathAbs(Close[shift+1] - Open[shift+1]);
+    bool secondSmall = secondBody < (High[shift+1] - Low[shift+1]) * 0.3;
+    
+    // Third candle: long bearish that closes into first candle's body
+    bool thirdBearish = Close[shift] < Open[shift];
+    bool thirdLong = MathAbs(Close[shift] - Open[shift]) > (High[shift] - Low[shift]) * 0.6;
+    bool closesIntoFirst = Close[shift] < (Open[shift+2] + Close[shift+2]) / 2;
+    
+    // Gap between first and second, second and third
+    bool gapUp = High[shift+1] > Close[shift+2];
+    bool gapDown = Low[shift] < Close[shift+1];
+    
+    return firstBullish && firstLong && secondSmall && thirdBearish && thirdLong && closesIntoFirst && gapUp && gapDown;
+}
+
+bool IsThreeWhiteSoldiers(int shift)
+{
+    // Need at least three candles
+    if (shift + 2 >= Bars) return false;
+    
+    // Three long bullish candles with small or no shadows
+    for (int i = 0; i < 3; i++)
+    {
+        if (Close[shift+i] <= Open[shift+i]) return false;
+        
+        double body = Close[shift+i] - Open[shift+i];
+        double upperShadow = High[shift+i] - Close[shift+i];
+        double lowerShadow = Open[shift+i] - Low[shift+i];
+        double range = High[shift+i] - Low[shift+i];
+        
+        if (body < range * 0.7) return false;
+        if (upperShadow > body * 0.2) return false;
+        if (lowerShadow > body * 0.2) return false;
+    }
+    
+    // Each candle opens within the previous body and closes above previous close
+    return Open[shift+1] > Open[shift] && Open[shift+1] < Close[shift] &&
+           Open[shift+2] > Open[shift+1] && Open[shift+2] < Close[shift+1] &&
+           Close[shift+1] > Close[shift] && Close[shift+2] > Close[shift+1];
+}
+
+bool IsThreeBlackCrows(int shift)
+{
+    // Need at least three candles
+    if (shift + 2 >= Bars) return false;
+    
+    // Three long bearish candles with small or no shadows
+    for (int i = 0; i < 3; i++)
+    {
+        if (Close[shift+i] >= Open[shift+i]) return false;
+        
+        double body = Open[shift+i] - Close[shift+i];
+        double upperShadow = High[shift+i] - Open[shift+i];
+        double lowerShadow = Close[shift+i] - Low[shift+i];
+        double range = High[shift+i] - Low[shift+i];
+        
+        if (body < range * 0.7) return false;
+        if (upperShadow > body * 0.2) return false;
+        if (lowerShadow > body * 0.2) return false;
+    }
+    
+    // Each candle opens within the previous body and closes below previous close
+    return Open[shift+1] < Open[shift] && Open[shift+1] > Close[shift] &&
+           Open[shift+2] < Open[shift+1] && Open[shift+2] > Close[shift+1] &&
+           Close[shift+1] < Close[shift] && Close[shift+2] < Close[shift+1];
+}
+
+bool IsTweezerBottom(int shift)
+{
+    // Need at least two candles
+    if (shift + 1 >= Bars) return false;
+    
+    // Same or very similar lows
+    return MathAbs(Low[shift] - Low[shift+1]) < point * 5;
+}
+
+bool IsTweezerTop(int shift)
+{
+    // Need at least two candles
+    if (shift + 1 >= Bars) return false;
+    
+    // Same or very similar highs
+    return MathAbs(High[shift] - High[shift+1]) < point * 5;
+}
+
+bool IsDoubleBottom()
+{
+    // Find two significant lows with a peak in between
+    int bars = MathMin(Bars, MaxBarsForPattern);
+    int low1Index = iLowest(NULL, 0, MODE_LOW, bars/2, 0);
+    int low2Index = iLowest(NULL, 0, MODE_LOW, bars/2, bars/2);
+    
+    if (low1Index == -1 || low2Index == -1) return false;
+    
+    // Lows should be approximately equal
+    if (MathAbs(Low[low1Index] - Low[low2Index]) > point * 10) return false;
+    
+    // Find the peak between the two lows
+    int peakIndex = iHighest(NULL, 0, MODE_HIGH, low2Index - low1Index, low1Index);
+    if (peakIndex == -1) return false;
+    
+    // Peak should be significantly higher than lows
+    if (High[peakIndex] - Low[low1Index] < point * 15) return false;
+    
+    // Volume should be higher on the first bottom and decrease on the second
+    if (UseVolumeFilter && iVolume(NULL, 0, low1Index) < iVolume(NULL, 0, low2Index)) return false;
+    
+    // Check if we're breaking the neckline (peak level)
+    return Close[0] > High[peakIndex];
+}
+
+bool IsDoubleTop()
+{
+    // Find two significant highs with a trough in between
+    int bars = MathMin(Bars, MaxBarsForPattern);
+    int high1Index = iHighest(NULL, 0, MODE_HIGH, bars/2, 0);
+    int high2Index = iHighest(NULL, 0, MODE_HIGH, bars/2, bars/2);
+    
+    if (high1Index == -1 || high2Index == -1) return false;
+    
+    // Highs should be approximately equal
+    if (MathAbs(High[high1Index] - High[high2Index]) > point * 10) return false;
+    
+    // Find the trough between the two highs
+    int troughIndex = iLowest(NULL, 0, MODE_LOW, high2Index - high1Index, high1Index);
+    if (troughIndex == -1) return false;
+    
+    // Trough should be significantly lower than highs
+    if (High[high1Index] - Low[troughIndex] < point * 15) return false;
+    
+    // Volume should be higher on the first top and decrease on the second
+    if (UseVolumeFilter && iVolume(NULL, 0, high1Index) < iVolume(NULL, 0, high2Index)) return false;
+    
+    // Check if we're breaking the neckline (trough level)
+    return Close[0] < Low[troughIndex];
+}
+
+bool IsHeadShoulders()
+{
+    // Implementation would be similar to double top but with three peaks
+    // where the middle peak is higher than the two shoulders
+    return false; // Placeholder
+}
+
+bool IsInvertedHeadShoulders()
+{
+    // Implementation would be similar to double bottom but with three troughs
+    // where the middle trough is lower than the two shoulders
+    return false; // Placeholder
+}
+
+bool IsAscendingTriangle()
+{
+    // Series of higher lows with similar highs
+    int bars = MathMin(Bars, MaxBarsForPattern);
+    int startIndex = bars - 1;
+    
+    // Find at least 4 swing highs and swing lows
+    int highs[10], lows[10];
+    int highCount = 0, lowCount = 0;
+    
+    for (int i = startIndex; i > 0 && (highCount < 10 || lowCount < 10); i--)
+    {
+        // Simple swing high detection
+        if (High[i] > High[i+1] && High[i] > High[i-1])
+        {
+            if (highCount < 10) highs[highCount++] = i;
+        }
+        
+        // Simple swing low detection
+        if (Low[i] < Low[i+1] && Low[i] < Low[i-1])
+        {
+            if (lowCount < 10) lows[lowCount++] = i;
+        }
+    }
+    
+    if (highCount < 3 || lowCount < 3) return false;
+    
+    // Check if highs are approximately equal
+    double highAvg = (High[highs[0]] + High[highs[1]] + High[highs[2]]) / 3;
+    for (int i = 0; i < MathMin(highCount, 5); i++)
+    {
+        if (MathAbs(High[highs[i]] - highAvg) > point * 10) return false;
+    }
+    
+    // Check if lows are ascending
+    for (int i = 1; i < MathMin(lowCount, 5); i++)
+    {
+        if (Low[lows[i]] <= Low[lows[i-1]]) return false;
+    }
+    
+    // Check if we're breaking the resistance
+    return Close[0] > highAvg;
+}
+
+bool IsDescendingTriangle()
+{
+    // Series of lower highs with similar lows
+    int bars = MathMin(Bars, MaxBarsForPattern);
+    int startIndex = bars - 1;
+    
+    // Find at least 4 swing highs and swing lows
+    int highs[10], lows[10];
+    int highCount = 0, lowCount = 0;
+    
+    for (int i = startIndex; i > 0 && (highCount < 10 || lowCount < 10); i--)
+    {
+        // Simple swing high detection
+        if (High[i] > High[i+1] && High[i] > High[i-1])
+        {
+            if (highCount < 10) highs[highCount++] = i;
+        }
+        
+        // Simple swing low detection
+        if (Low[i] < Low[i+1] && Low[i] < Low[i-1])
+        {
+            if (lowCount < 10) lows[lowCount++] = i;
+        }
+    }
+    
+    if (highCount < 3 || lowCount < 3) return false;
+    
+    // Check if lows are approximately equal
+    double lowAvg = (Low[lows[0]] + Low[lows[1]] + Low[lows[2]]) / 3;
+    for (int i = 0; i < MathMin(lowCount, 5); i++)
+    {
+        if (MathAbs(Low[lows[i]] - lowAvg) > point * 10) return false;
+    }
+    
+    // Check if highs are descending
+    for (int i = 1; i < MathMin(highCount, 5); i++)
+    {
+        if (High[highs[i]] >= High[highs[i-1]]) return false;
+    }
+    
+    // Check if we're breaking the support
+    return Close[0]
